@@ -25,85 +25,152 @@ from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-# ---------------- heuristics ----------------
+# common keywords
 COMMON_CSRF_NAMES = [
     'csrf_token', 'csrfmiddlewaretoken', 'authenticity_token', '__requestverificationtoken',
     'xsrf-token', 'xsrf_token', 'XSRF-TOKEN', 'csrf', '_csrf', '_csrf_token', 'token'
 ]
 STATE_CHANGE_KEYWORDS = ['delete', 'remove', 'destroy', 'logout', 'revoke', 'disable', 'update', 'edit', 'create', 'post', 'withdraw', 'changepassword', 'addfunds']
 
-USER_AGENT = 'Active-CSRF-Tester/1.0 (+https://your-org.example)'
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0'
 
-# ---------------- utilities ----------------
+# utilities
 def normalize_url(url):
-    u, _ = urldefrag(url)
-    return u
+    # Remove anything after the "#" character, resource
+    if "#" in url:
+        url = url.split("#")[0]
+    return url
+
 
 def same_domain(a, b):
+    # check if protocol://domain:port part is same
     return urlparse(a).netloc == urlparse(b).netloc
 
 def looks_like_state_changing_url(href):
+    
+    # if empty or None
     if not href:
         return False
+    
+    # convert to lowercase
     href_lower = href.lower()
+    
+    # if keyword is present in href then return true
     for kw in STATE_CHANGE_KEYWORDS:
         if kw in href_lower:
             return True
+    
+    # use RE to search of something like action=delete, cmd=update or use loop
     if '?' in href:
-        q = href.split('?',1)[1]
-        if re.search(r'\b(action|cmd|op)=(' + '|'.join(STATE_CHANGE_KEYWORDS) + r')\b', q, re.IGNORECASE):
-            return True
-    return False
+        # Split the URL into two parts at the '?' character
+        query_string = href.split('?', 1)[1]
+
+        # Check if any of the state-changing keywords are in the query string
+        for kw in STATE_CHANGE_KEYWORDS:
+            if kw in query_string.lower():  # Case-insensitive check
+                return True
+
+return False
+
 
 def is_likely_csrf_token_name(name):
+    
+    # if empty
     if not name:
         return False
+    
+    # change to lower case
     lname = name.lower()
+    
+    # check if common csrf token name is present in name
     for common in COMMON_CSRF_NAMES:
         if common in lname:
             return True
+    
+    # or see if starts with some keywords
     if lname.startswith('x-csrf') or lname.startswith('x-xsrf') or lname.startswith('__requestverificationtoken'):
         return True
+        
     return False
 
 def simple_response_similarity(a_text, b_text):
+    
+    # check if empty
     if a_text is None or b_text is None:
         return False
+    
+    # get length of a and b
     la, lb = len(a_text), len(b_text)
+    
+    # if both are len=0
     if la == 0 and lb == 0:
         return True
+    
+    # if one of them is empty, then they are different
     if max(la, lb) == 0:
         return False
+    
+    # If the difference in length between the two texts is more than 20%, return False
     if abs(la - lb) / max(la, lb) > 0.20:
         return False
+        
+    
     sa = ' '.join(a_text.split())
     sb = ' '.join(b_text.split())
     seq = difflib.SequenceMatcher(None, sa, sb)
+    
+    # The quick_ratio() method returns a similarity ratio between 0 and 1
     return seq.quick_ratio() > 0.92
 
 def get_links_and_forms(html, base):
+    
+    # parse the html
     soup = BeautifulSoup(html, 'html.parser')
+    
+    # create an empty set of links
     links = set()
+    
+    
+    # soup.find_all('a', href=True) finds all anchor (<a>) tags that have an href attribute.
+
+    # urljoin(base, a['href'].strip()) combines the base URL (base) with the relative URL (a['href']). 
+    # The strip() method ensures any leading/trailing whitespace is removed.
+
+    # normalize_url(full) is used to normalize the resulting URL (e.g., removing fragments, standardizing the format).
     for a in soup.find_all('a', href=True):
         full = urljoin(base, a['href'].strip())
         links.add(normalize_url(full))
+    
+    # find all forms
     forms = soup.find_all('form')
+    
+    # return set of all links and list of all forms
     return links, forms
 
 def extract_form_action(form, current_url):
+    
     action = form.get('action')
+    
     if not action:
         return current_url
+    
     return normalize_url(urljoin(current_url, action))
 
 def gather_hidden_inputs(form):
+    
     data = {}
+    
     for inp in form.find_all('input'):
+        
         name = inp.get('name')
+        
         if not name:
             continue
+        
         value = inp.get('value', '')
         data[name] = value
+    
+    # return name and value pairs of hidden inputs in a form
     return data
 
 # ---------------- login helpers ----------------
