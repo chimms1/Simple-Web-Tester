@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 vulnerability_scanner.py
-Active vulnerability scanner for CSRF, Reflected XSS, and SQL Injection with automatic login
-and SQLi testing on the login form.
+Active vulnerability scanner for CSRF, Reflected XSS, SQL Injection, and OS Command Injection
+with automatic login and login-form SQLi testing.
 
 Usage:
   python vulnerability_scanner.py --base http://localhost:3000/ --username bee --password buggy
 
-WARNING: This script actively submits state-changing and probe requests.
-Only run on systems you own or have explicit permission to test.
+WARNING: This script actively submits state-changing and probe requests and may cause commands to run
+on the target if it's vulnerable. Only run on systems you own or have explicit permission to test.
 """
 
 import argparse
@@ -21,10 +21,8 @@ from bs4 import BeautifulSoup
 import difflib
 import json
 
-# Suppress only the single InsecureRequestWarning from urllib3 needed for self-signed certs
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
 
 # --- Heuristics and Payloads ---
 COMMON_CSRF_NAMES = [
@@ -52,6 +50,33 @@ SQL_ERRORS = [
     "sql syntax", "mysql_fetch", "ora-", "sqlstate", "odbc", "warning: sqlite",
     "unterminated quoted string", "quoted string not properly terminated"
 ]
+
+# --- CMDi payloads (safe, non-destructive) ---
+# These try to inject a command that echoes a unique marker. Includes variants for shell metacharacters.
+CMDI_MARKER = "CMD_INJECTED_42"   # unique marker (change if you want)
+CMDI_PAYLOADS = [
+    # Unix-style: close previous command and echo marker
+    f"; echo {CMDI_MARKER}",
+    f"'; echo {CMDI_MARKER}; '",
+    f"\"; echo {CMDI_MARKER}; \"",
+    f" || echo {CMDI_MARKER}",
+    f" && echo {CMDI_MARKER}",
+    # subshell / command substitution
+    f"$(echo {CMDI_MARKER})",
+    f"`echo {CMDI_MARKER}`",
+    # pipe variant
+    f"| echo {CMDI_MARKER}",
+    # Windows style (in case target is Windows)
+    f"& echo {CMDI_MARKER}",
+    f"^& echo {CMDI_MARKER}"
+]
+
+# --- OS command keyword detection (passive) ---
+OS_CMD_KEYWORDS = [
+    'date', 'ls', 'cat', 'whoami', 'pwd', 'dir', 'echo', 'uname', 'netstat',
+    'ifconfig', 'ping', 'curl', 'wget', 'nc', 'rm', 'touch', 'shutdown', 'reboot'
+]
+OS_CMD_PARAM_NAMES = ['command', 'cmd', 'exec', 'run', 'shell', 'system', 'oscmd']
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0'
 
@@ -127,6 +152,30 @@ def gather_hidden_inputs(form):
         data[name] = value
     return data
 
+# --- OS command keyword detection (passive) ---
+def detect_form_for_os_commands(form, page_url):
+    suspicious = []
+    for inp in form.find_all('input'):
+        name = inp.get('name', '').lower()
+        value = inp.get('value', '').lower()
+        if any(param in name for param in OS_CMD_PARAM_NAMES):
+            suspicious.append({
+                'page': page_url,
+                'parameter': name,
+                'reason': 'suspicious parameter name in form'
+            })
+        for cmd in OS_CMD_KEYWORDS:
+            if cmd in value:
+                suspicious.append({
+                    'page': page_url,
+                    'parameter': name,
+                    'value': value,
+                    'command': cmd,
+                    'reason': f'suspicious value in hidden input ("{cmd}")'
+                })
+    return suspicious
+
+
 # --- Login Helpers ---
 def looks_like_login_form(form):
     uname_fields = ['username','user','email','login','userid']
@@ -179,7 +228,6 @@ def attempt_form_login(session, page_url, username, password):
     method = (candidate.get('method') or 'post').lower()
 
     try:
-        # session.request uses session.verify automatically
         resp = session.request(method, action, data=data, timeout=20, allow_redirects=True)
         if resp.status_code < 400:
             return resp
@@ -188,7 +236,7 @@ def attempt_form_login(session, page_url, username, password):
         return None
     return None
 
-# --- NEW: Login-form SQLi test ---
+# --- Login-form SQLi test ---
 def test_login_form_for_sqli(session, form, page_url):
     findings = []
     action = extract_form_action(form, page_url)
@@ -197,7 +245,6 @@ def test_login_form_for_sqli(session, form, page_url):
         return findings
 
     baseline = build_baseline_payload(form)
-    # find username/password fields
     uname_field = None
     pword_field = None
     for inp in form.find_all('input'):
@@ -207,11 +254,19 @@ def test_login_form_for_sqli(session, form, page_url):
             uname_field = name
         if any(p in lname for p in ['password','pass']) and not pword_field:
             pword_field = name
-
     if not uname_field:
         return findings
 
-    # store baseline response for comparison
+    # # Passive: detect os-command-like values in the login form baseline
+    # os_form_findings = detect_form_for_os_commands(f, url)
+    # if os_issues:
+    #     findings.append({
+    #         'type': 'os-keyword',
+    #         'page': page_url,
+    #         'form_action': action,
+    #         'detail': f'OS command-like values in login form: {os_issues}'
+    #     })
+
     baseline_resp = None
     try:
         if method == 'get':
@@ -224,7 +279,6 @@ def test_login_form_for_sqli(session, form, page_url):
     for payload in SQLI_PAYLOADS:
         injected = baseline.copy()
         injected[uname_field] = payload
-        # keep some password value if present
         if pword_field:
             injected[pword_field] = 'randompass'
         try:
@@ -236,7 +290,6 @@ def test_login_form_for_sqli(session, form, page_url):
             continue
 
         body = (r.text or '').lower()
-        # 1) error-string detection
         if any(err in body for err in SQL_ERRORS):
             findings.append({
                 'type': 'sqli-login',
@@ -247,9 +300,6 @@ def test_login_form_for_sqli(session, form, page_url):
                 'detail': 'SQL error string found in login response.'
             })
             break
-
-        # 2) login bypass heuristics: if injecting payload appears to allow login / redirect to dashboard
-        #    check for keywords commonly present on successful login or different response compared to baseline
         success_indicators = ['dashboard', 'welcome', 'logged in', 'logout']
         if any(ind in body for ind in success_indicators):
             findings.append({
@@ -261,8 +311,6 @@ def test_login_form_for_sqli(session, form, page_url):
                 'detail': 'Login-like success indicator found after injection (possible login bypass).'
             })
             break
-
-        # 3) response difference vs baseline
         if baseline_resp and not simple_response_similarity(baseline_resp.text or '', r.text or ''):
             findings.append({
                 'type': 'sqli-login',
@@ -284,24 +332,17 @@ def build_baseline_payload(form):
         if not name: continue
         itype = (inp.get('type') or 'text').lower()
         val = inp.get('value','')
-        if itype in ('hidden','submit'):
-            data[name] = val
-        elif itype in ('text','email','search','tel'):
-            data[name] = val or 'test'
-        elif itype == 'password':
-            data[name] = val or 'TestPass123!'
-        elif itype == 'number':
-            data[name] = val or '1'
-        else:
-            data[name] = val
+        if itype in ('hidden','submit'): data[name] = val
+        elif itype in ('text','email','search','tel'): data[name] = val or 'test'
+        elif itype == 'password': data[name] = val or 'TestPass123!'
+        elif itype == 'number': data[name] = val or '1'
+        else: data[name] = val
     for ta in form.find_all('textarea'):
         name = ta.get('name')
-        if name:
-            data[name] = ta.text or 'test'
+        if name: data[name] = ta.text or 'test'
     for s in form.find_all('select'):
         name = s.get('name')
-        if not name:
-            continue
+        if not name: continue
         opt = s.find('option', selected=True) or s.find('option')
         data[name] = opt.get('value') or opt.text if opt else '1'
     return data
@@ -463,6 +504,95 @@ def test_form_for_sqli(session, form, page_url):
                 continue
     return findings
 
+# --- NEW: OS Command Injection Test Helpers (with passive OS-keyword checks) ---
+def test_url_for_cmdi(session, url):
+    """
+    Test GET parameters for command injection by injecting echo-marker payloads
+    and looking for the marker in the response. Also perform passive OS-keyword checks on parameters.
+    """
+    findings = []
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    if not params:
+        return findings
+
+    # Passive: detect os command keywords and suspicious parameter names
+    # os_issues = detect_os_command_keywords(params)
+    # if os_issues:
+    #     findings.append({
+    #         'type': 'os-keyword',
+    #         'page': url,
+    #         'detail': f'OS command-like values or parameter names found in URL params: {os_issues}'
+    #     })
+
+    for param in params:
+        for payload in CMDI_PAYLOADS:
+            injected = params.copy()
+            injected[param] = [payload]
+            new_query = urlencode(injected, doseq=True)
+            test_url = parsed._replace(query=new_query).geturl()
+            try:
+                r = session.get(test_url, timeout=10)
+            except requests.exceptions.RequestException:
+                continue
+            body = r.text or ''
+            # marker detection (case-sensitive to avoid false positives)
+            if CMDI_MARKER in body:
+                findings.append({
+                    'type': 'cmdi-get',
+                    'page': url,
+                    'vulnerable_url': test_url,
+                    'parameter': param,
+                    'payload': payload,
+                    'detail': f'Command injection marker "{CMDI_MARKER}" found in response.'
+                })
+                break
+    return findings
+
+def test_form_for_cmdi(session, form, page_url):
+    """
+    Test POST forms for command injection by injecting echo-marker payloads into fields
+    and checking for the marker in the response. Also perform passive OS-keyword checks on form inputs.
+    """
+    findings = []
+    action = extract_form_action(form, page_url)
+    method = (form.get('method') or 'get').lower()
+    if method not in ('post','put','patch'):
+        return findings
+
+    baseline_data = build_baseline_payload(form)
+
+    # Passive check on baseline form inputs
+    # os_issues = detect_os_command_keywords(baseline_data)
+    # if os_issues:
+    #     findings.append({
+    #         'type': 'os-keyword',
+    #         'page': page_url,
+    #         'form_action': action,
+    #         'detail': f'OS command-like values or parameter names found in form inputs: {os_issues}'
+    #     })
+
+    for field in list(baseline_data.keys()):
+        for payload in CMDI_PAYLOADS:
+            injected = baseline_data.copy()
+            injected[field] = payload
+            try:
+                r = session.post(action, data=injected, timeout=10)
+            except requests.exceptions.RequestException:
+                continue
+            body = r.text or ''
+            if CMDI_MARKER in body:
+                findings.append({
+                    'type': 'cmdi-post',
+                    'page': page_url,
+                    'form_action': action,
+                    'parameter': field,
+                    'payload': payload,
+                    'detail': f'Command injection marker "{CMDI_MARKER}" found in response.'
+                })
+                break
+    return findings
+
 # --- Crawler ---
 def crawl_and_test(args):
     session = requests.Session()
@@ -482,9 +612,10 @@ def crawl_and_test(args):
         print(f"[*] Crawling: {url}")
         visited.add(url)
 
-        # XSS & SQLi tests on URL params (passive)
+        # Passive: test URL parameters for XSS, SQLi, CMDi and OS-keywords
         findings.extend(test_url_for_xss(session, url))
         findings.extend(test_url_for_sqli(session, url))
+        findings.extend(test_url_for_cmdi(session, url))
 
         try:
             r = session.get(url, timeout=20)
@@ -500,12 +631,21 @@ def crawl_and_test(args):
         # Auto login if login form detected and not logged in yet
         if not logged_in:
             for f in forms:
+                
+                os_form_findings = detect_form_for_os_commands(f, url)
+                if os_form_findings:
+                    findings.extend(os_form_findings)
+                    
                 if looks_like_login_form(f):
-                    # NEW: probe login form for SQLi first
+                    # 1) test login form for SQLi
                     sqli_login_findings = test_login_form_for_sqli(session, f, url)
                     if sqli_login_findings:
                         findings.extend(sqli_login_findings)
-                    # Then attempt normal login with provided creds
+                    # 2) test login form for CMDi (special-case: login 'username' param)
+                    cmdi_login_findings = test_form_for_cmdi(session, f, url)
+                    if cmdi_login_findings:
+                        findings.extend(cmdi_login_findings)
+                    # Then attempt normal login
                     login_response = attempt_form_login(session, url, args.username, args.password)
                     if login_response:
                         logged_in = True
@@ -513,11 +653,11 @@ def crawl_and_test(args):
                         final_url_after_login = normalize_url(login_response.url)
                         if final_url_after_login not in visited:
                             to_visit.appendleft(final_url_after_login)
-                        # re-crawl the current URL later with authenticated session
                         to_visit.appendleft(url)
                         links, forms = set(), []
                         break
 
+        # enqueue links and flag suspicious GETs
         for link in links:
             if same_domain(link, args.base):
                 if args.exclude and any(re.search(p, link) for p in args.exclude): continue
@@ -527,7 +667,13 @@ def crawl_and_test(args):
                     findings.append({'type':'dangerous-link-get','page':url,'link':link,
                                      'detail':'Link contains state-change keyword and uses GET. Potential CSRF.'})
 
+        # For each discovered form: CSRF active test, XSS POST test, SQLi POST test, CMDi POST test
         for f in forms:
+            
+            os_form_findings = detect_form_for_os_commands(f, url)
+            if os_form_findings:
+                findings.extend(os_form_findings)
+                    
             method = (f.get('method') or 'get').lower()
             action = extract_form_action(f, url)
             is_state = method in ('post','put','patch','delete') or looks_like_state_changing_url(action)
@@ -538,6 +684,7 @@ def crawl_and_test(args):
 
             findings.extend(test_form_for_xss(session, f, url))
             findings.extend(test_form_for_sqli(session, f, url))
+            findings.extend(test_form_for_cmdi(session, f, url))
 
             time.sleep(args.delay)
 
@@ -547,7 +694,7 @@ def crawl_and_test(args):
 # --- Reporting ---
 def create_report(report_file, findings, visited):
     lines = []
-    lines.append("Active Vulnerability Scanner Report (CSRF, XSS, SQLi)")
+    lines.append("Active Vulnerability Scanner Report (CSRF, XSS, SQLi, CMDi)")
     lines.append("Only run on systems you own or are explicitly authorized to test.")
     lines.append(f"\nPages visited ({len(visited)}):")
     for page in sorted(list(visited)):
@@ -557,7 +704,8 @@ def create_report(report_file, findings, visited):
 
     vulnerable_types = ['active-missing-csrf', 'dangerous-link-get',
                         'reflected-xss-get', 'reflected-xss-post',
-                        'sqli-get', 'sqli-post', 'sqli-login']
+                        'sqli-get', 'sqli-post', 'sqli-login',
+                        'cmdi-get', 'cmdi-post']
     vulnerable_findings = [f for f in findings if f.get('type') in vulnerable_types]
     other_findings = [f for f in findings if f.get('type') not in vulnerable_types]
 
@@ -580,7 +728,7 @@ def create_report(report_file, findings, visited):
 
 # --- CLI ---
 def parse_args():
-    p = argparse.ArgumentParser(description="Active CSRF, XSS and SQLi testing crawler with automatic login.")
+    p = argparse.ArgumentParser(description="Active CSRF, XSS, SQLi and CMDi testing crawler with automatic login.")
     p.add_argument('--base', required=True, help='Base URL to start crawl')
     p.add_argument('--username', required=True, help='Username for login')
     p.add_argument('--password', required=True, help='Password for login')
@@ -596,7 +744,8 @@ def main():
     print("ACTIVE VULNERABILITY SCANNER — destructive active tests will be performed.")
     print("Ensure you have explicit authorization to test the target system!")
     findings = crawl_and_test(args)
-    vuln_types = ['active-missing-csrf', 'dangerous-link-get', 'reflected-xss-get', 'reflected-xss-post', 'sqli-get', 'sqli-post', 'sqli-login']
+    vuln_types = ['active-missing-csrf', 'dangerous-link-get', 'reflected-xss-get',
+                  'reflected-xss-post', 'sqli-get', 'sqli-post', 'sqli-login', 'cmdi-get', 'cmdi-post']
     vuln_count = sum(1 for f in findings if f.get('type') in vuln_types)
     print(f"[+] Crawl finished. Potential vulnerabilities found: {vuln_count}. Report saved to {args.report_file}")
 
