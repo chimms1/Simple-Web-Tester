@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-active_csrf_auto_login.py
-Active CSRF testing crawler with automatic login detection (ONLY ACTIVE TESTING).
+vulnerability_scanner.py
+Active vulnerability scanner for CSRF and Reflected XSS with automatic login.
 
 Usage:
   python main.py --base http://localhost:3000/ --username bee --password buggy
 
-WARNING: This script actively submits state-changing requests (POST/PUT/PATCH/DELETE).
+WARNING: This script actively submits state-changing and probe requests.
 Only run on systems you own or have explicit permission to test.
 """
 
 import argparse
 import time
 import re
-from urllib.parse import urljoin, urlparse, urldefrag
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, urlencode
 from collections import deque
 import requests
 from bs4 import BeautifulSoup
@@ -25,155 +25,99 @@ from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-# common keywords
+# --- Heuristics and Payloads ---
 COMMON_CSRF_NAMES = [
     'csrf_token', 'csrfmiddlewaretoken', 'authenticity_token', '__requestverificationtoken',
     'xsrf-token', 'xsrf_token', 'XSRF-TOKEN', 'csrf', '_csrf', '_csrf_token', 'token'
 ]
 STATE_CHANGE_KEYWORDS = ['delete', 'remove', 'destroy', 'logout', 'revoke', 'disable', 'update', 'edit', 'create', 'post', 'withdraw', 'changepassword', 'addfunds']
 
+# Payloads designed to break out of HTML attributes and script contexts.
+XSS_PAYLOADS = [
+    '"><script>alert("XSS-Scanner-Probe")</script>',
+    "'><script>alert('XSS-Scanner-Probe')</script>",
+    '<img src=x onerror=alert("XSS-Scanner-Probe")>',
+    '"><svg/onload=alert`XSS-Scanner-Probe`>'
+]
+
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0'
 
-# utilities
+# --- Utilities ---
 def normalize_url(url):
-    # Remove anything after the "#" character, resource
-    if "#" in url:
-        url = url.split("#")[0]
-    return url
-
+    """Removes URL fragment and standardizes."""
+    u, _ = urldefrag(url)
+    return u
 
 def same_domain(a, b):
-    # check if protocol://domain:port part is same
     return urlparse(a).netloc == urlparse(b).netloc
 
 def looks_like_state_changing_url(href):
-    
-    # if empty or None
+    """More precise check for state-changing keywords in URLs."""
     if not href:
         return False
-    
-    # convert to lowercase
     href_lower = href.lower()
-    
-    # if keyword is present in href then return true
     for kw in STATE_CHANGE_KEYWORDS:
         if kw in href_lower:
             return True
-    
-    # use RE to search of something like action=delete, cmd=update or use loop
+    # Look for patterns like action=delete, op=remove, etc. for better accuracy
     if '?' in href:
-        # Split the URL into two parts at the '?' character
-        query_string = href.split('?', 1)[1]
-
-        # Check if any of the state-changing keywords are in the query string
-        for kw in STATE_CHANGE_KEYWORDS:
-            if kw in query_string.lower():  # Case-insensitive check
-                return True
-
-return False
-
+        q = href.split('?', 1)[1]
+        if re.search(r'\b(action|cmd|op)=(' + '|'.join(STATE_CHANGE_KEYWORDS) + r')\b', q, re.IGNORECASE):
+            return True
+    return False
 
 def is_likely_csrf_token_name(name):
-    
-    # if empty
     if not name:
         return False
-    
-    # change to lower case
     lname = name.lower()
-    
-    # check if common csrf token name is present in name
     for common in COMMON_CSRF_NAMES:
         if common in lname:
             return True
-    
-    # or see if starts with some keywords
     if lname.startswith('x-csrf') or lname.startswith('x-xsrf') or lname.startswith('__requestverificationtoken'):
         return True
-        
     return False
 
 def simple_response_similarity(a_text, b_text):
-    
-    # check if empty
     if a_text is None or b_text is None:
         return False
-    
-    # get length of a and b
     la, lb = len(a_text), len(b_text)
-    
-    # if both are len=0
     if la == 0 and lb == 0:
         return True
-    
-    # if one of them is empty, then they are different
     if max(la, lb) == 0:
         return False
-    
-    # If the difference in length between the two texts is more than 20%, return False
     if abs(la - lb) / max(la, lb) > 0.20:
         return False
-        
-    
     sa = ' '.join(a_text.split())
     sb = ' '.join(b_text.split())
     seq = difflib.SequenceMatcher(None, sa, sb)
-    
-    # The quick_ratio() method returns a similarity ratio between 0 and 1
     return seq.quick_ratio() > 0.92
 
 def get_links_and_forms(html, base):
-    
-    # parse the html
     soup = BeautifulSoup(html, 'html.parser')
-    
-    # create an empty set of links
     links = set()
-    
-    
-    # soup.find_all('a', href=True) finds all anchor (<a>) tags that have an href attribute.
-
-    # urljoin(base, a['href'].strip()) combines the base URL (base) with the relative URL (a['href']). 
-    # The strip() method ensures any leading/trailing whitespace is removed.
-
-    # normalize_url(full) is used to normalize the resulting URL (e.g., removing fragments, standardizing the format).
     for a in soup.find_all('a', href=True):
         full = urljoin(base, a['href'].strip())
         links.add(normalize_url(full))
-    
-    # find all forms
     forms = soup.find_all('form')
-    
-    # return set of all links and list of all forms
     return links, forms
 
 def extract_form_action(form, current_url):
-    
     action = form.get('action')
-    
     if not action:
         return current_url
-    
     return normalize_url(urljoin(current_url, action))
 
 def gather_hidden_inputs(form):
-    
     data = {}
-    
     for inp in form.find_all('input'):
-        
         name = inp.get('name')
-        
         if not name:
             continue
-        
         value = inp.get('value', '')
         data[name] = value
-    
-    # return name and value pairs of hidden inputs in a form
     return data
 
-# ---------------- login helpers ----------------
+# --- Login Helpers ---
 def looks_like_login_form(form):
     uname_fields = ['username','user','email','login','userid']
     pword_fields = ['password','pass']
@@ -183,17 +127,12 @@ def looks_like_login_form(form):
     return has_uname and has_pword
 
 def attempt_form_login(session, page_url, username, password):
-    """
-    Attempt login using the form found on the page URL.
-    Returns the final response object on success, otherwise None.
-    """
     try:
         page_resp = session.get(page_url, timeout=20)
         soup = BeautifulSoup(page_resp.text, 'html.parser')
     except requests.exceptions.RequestException as e:
         print(f"[!] Could not fetch login page {page_url}: {e}")
         return None
-
     forms = soup.find_all('form')
     candidate = None
     uname_names = ['username','user','email','login','userid']
@@ -207,7 +146,6 @@ def attempt_form_login(session, page_url, username, password):
         candidate = forms[0]
     elif candidate is None:
         return None
-
     data = gather_hidden_inputs(candidate)
     ufield = pfield = None
     for inp in candidate.find_all('input'):
@@ -221,45 +159,36 @@ def attempt_form_login(session, page_url, username, password):
     pfield = pfield or 'password'
     data[ufield] = username
     data[pfield] = password
-
     action = extract_form_action(candidate, page_url)
     method = (candidate.get('method') or 'post').lower()
     try:
         resp = session.request(method, action, data=data, timeout=20, allow_redirects=True)
         if resp.status_code < 400:
-            return resp  # *** MODIFIED: Return response object on success
+            return resp
     except requests.exceptions.RequestException as e:
         print(f"[!] Login request to {action} failed: {e}")
         return None
-    return None # *** MODIFIED: Return None on failure
+    return None
 
-# ---------------- CSRF active test helpers ----------------
+# --- CSRF Active Test Helpers ---
 def build_baseline_payload(form):
     data = {}
     for inp in form.find_all('input'):
         name = inp.get('name')
-        if not name:
-            continue
+        if not name: continue
         itype = (inp.get('type') or 'text').lower()
         val = inp.get('value','')
-        if itype in ('hidden','submit'):
-            data[name] = val
-        elif itype in ('text','email','search','tel'):
-            data[name] = val or 'test'
-        elif itype == 'password':
-            data[name] = val or 'TestPass123!'
-        elif itype == 'number':
-            data[name] = val or '1'
-        else:
-            data[name] = val
+        if itype in ('hidden','submit'): data[name] = val
+        elif itype in ('text','email','search','tel'): data[name] = val or 'test'
+        elif itype == 'password': data[name] = val or 'TestPass123!'
+        elif itype == 'number': data[name] = val or '1'
+        else: data[name] = val
     for ta in form.find_all('textarea'):
         name = ta.get('name')
-        if name:
-            data[name] = ta.text or 'test'
+        if name: data[name] = ta.text or 'test'
     for s in form.find_all('select'):
         name = s.get('name')
-        if not name:
-            continue
+        if not name: continue
         opt = s.find('option', selected=True) or s.find('option')
         data[name] = opt.get('value') or opt.text if opt else '1'
     return data
@@ -270,15 +199,10 @@ def build_stripped_payload(baseline):
 def attempt_active_csrf_test(session, form, page_url):
     action = extract_form_action(form, page_url)
     method = (form.get('method') or 'post').lower()
-    if method not in ('post','put','patch','delete'):
-        return None
-
+    if method not in ('post','put','patch','delete'): return None
     baseline = build_baseline_payload(form)
-    if not baseline:
-        return None
-
+    if not baseline: return None
     headers = dict(session.headers)
-
     try:
         r1 = session.request(method, action, data=baseline, headers=headers, timeout=20)
         stripped_payload = build_stripped_payload(baseline)
@@ -286,20 +210,9 @@ def attempt_active_csrf_test(session, form, page_url):
         r2 = session.request(method, action, data=stripped_payload, headers=stripped_headers, timeout=20)
     except Exception as e:
         return {'type':'active-test-error','page':page_url,'action':action,'detail':str(e)}
-
     status_similar = (r1.status_code == r2.status_code) or (200 <= r1.status_code < 400 and 200 <= r2.status_code < 400)
     body_similar = simple_response_similarity(r1.text or '', r2.text or '')
-
-    finding = {
-        'page': page_url,
-        'form_action': action,
-        'method': method,
-        'baseline_status': r1.status_code,
-        'stripped_status': r2.status_code,
-        'baseline_body_len': len(r1.text or ''),
-        'stripped_body_len': len(r2.text or '')
-    }
-
+    finding = {'page': page_url,'form_action': action,'method': method,'baseline_status': r1.status_code,'stripped_status': r2.status_code,'baseline_body_len': len(r1.text or ''),'stripped_body_len': len(r2.text or '')}
     if status_similar and body_similar:
         finding['type'] = 'active-missing-csrf'
         finding['detail'] = 'Stripped request succeeded similarly -> likely missing CSRF protections.'
@@ -309,13 +222,67 @@ def attempt_active_csrf_test(session, form, page_url):
         finding['detail'] = 'CSRF protections likely present.'
         return finding
 
-# ---------------- crawler ----------------
+# --- NEW: XSS Active Test Helpers ---
+def test_url_for_xss(session, url):
+    """Tests GET parameters in a URL for reflected XSS."""
+    findings = []
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    if not query_params:
+        return findings
+
+    for param in query_params:
+        for payload in XSS_PAYLOADS:
+            injected_params = query_params.copy()
+            injected_params[param] = [payload]
+            new_query = urlencode(injected_params, doseq=True)
+            test_url = parsed_url._replace(query=new_query).geturl()
+            try:
+                r = session.get(test_url, timeout=10)
+                if payload in r.text:
+                    findings.append({
+                        'type': 'reflected-xss-get', 'page': url, 'vulnerable_url': test_url,
+                        'parameter': param, 'payload': payload,
+                        'detail': 'A payload was reflected unencoded in the response.'
+                    })
+                    break
+            except requests.exceptions.RequestException:
+                continue
+    return findings
+
+def test_form_for_xss(session, form, page_url):
+    """Tests POST form inputs for reflected XSS."""
+    findings = []
+    action = extract_form_action(form, page_url)
+    method = (form.get('method') or 'get').lower()
+    if method != 'post':
+        return findings
+
+    baseline_data = build_baseline_payload(form)
+    for field in baseline_data.keys():
+        for payload in XSS_PAYLOADS:
+            injected_data = baseline_data.copy()
+            injected_data[field] = payload
+            try:
+                r = session.post(action, data=injected_data, timeout=10)
+                if payload in r.text:
+                    print(r.text)
+                    findings.append({
+                        'type': 'reflected-xss-post', 'page': page_url, 'form_action': action,
+                        'parameter': field, 'payload': payload,
+                        'detail': 'A payload was reflected unencoded in the response.'
+                    })
+                    break
+            except requests.exceptions.RequestException:
+                continue
+    return findings
+
+# --- Crawler ---
 def crawl_and_test(args):
     session = requests.Session()
     session.headers.update({'User-Agent': USER_AGENT})
     if args.insecure:
         session.verify = False
-
     visited = set()
     to_visit = deque([args.base])
     findings = []
@@ -326,9 +293,13 @@ def crawl_and_test(args):
         url = normalize_url(to_visit.popleft())
         if url in visited:
             continue
-        
         print(f"[*] Crawling: {url}")
         visited.add(url)
+
+        # NEW: Test GET parameters for XSS on every new URL found
+        xss_get_findings = test_url_for_xss(session, url)
+        if xss_get_findings:
+            findings.extend(xss_get_findings)
 
         try:
             r = session.get(url, timeout=20)
@@ -339,45 +310,31 @@ def crawl_and_test(args):
         pages_checked += 1
         if 'text/html' not in r.headers.get('Content-Type',''):
             continue
-
         links, forms = get_links_and_forms(r.text, url)
-
         if not logged_in:
             for f in forms:
                 if looks_like_login_form(f):
-                    # *** MODIFIED: Handle the response object from the login function
                     login_response = attempt_form_login(session, url, args.username, args.password)
                     if login_response:
                         logged_in = True
                         print(f"[+] Logged in successfully. The session is now authenticated.")
-                        
-                        # Get the URL we landed on after all redirects.
                         final_url_after_login = normalize_url(login_response.url)
                         print(f"[+] Redirected to {final_url_after_login}. Adding to crawl queue.")
-                        
-                        # Add the new page to the FRONT of the queue to crawl it next.
                         if final_url_after_login not in visited:
                             to_visit.appendleft(final_url_after_login)
-                        
-                        # Also re-add the current page. Its content may have changed now that we are logged in.
                         to_visit.appendleft(url)
-                        
-                        # Clear current links and forms because we are going to re-crawl this page authenticated.
                         links, forms = set(), []
-                        break # Stop trying other login forms on this page.
-
-        # enqueue links
+                        break
         for link in links:
             if same_domain(link, args.base):
-                if args.exclude and any(re.search(p, link) for p in args.exclude):
-                    continue
+                if args.exclude and any(re.search(p, link) for p in args.exclude): continue
                 if link not in visited:
                     to_visit.append(link)
                 if looks_like_state_changing_url(link):
                     findings.append({'type':'dangerous-link-get','page':url,'link':link,'detail':'Link contains state-change keyword and uses GET. Potential CSRF.'})
-
-        # active CSRF test on forms
+        
         for f in forms:
+            # Test for CSRF
             method = (f.get('method') or 'get').lower()
             action = extract_form_action(f, url)
             is_state = method in ('post','put','patch','delete') or looks_like_state_changing_url(action)
@@ -385,17 +342,21 @@ def crawl_and_test(args):
                 result = attempt_active_csrf_test(session, f, url)
                 if result:
                     findings.append(result)
-                time.sleep(args.delay)
 
-        time.sleep(args.delay)
+            # NEW: Test form for POST-based XSS
+            xss_post_findings = test_form_for_xss(session, f, url)
+            if xss_post_findings:
+                findings.extend(xss_post_findings)
+            
+            time.sleep(args.delay)
 
     create_report(args.report_file, findings, visited)
     return findings
 
-# ---------------- reporting ----------------
+# --- Reporting ---
 def create_report(report_file, findings, visited):
     lines = []
-    lines.append("Active CSRF Tester Report (Auto-login)")
+    lines.append("Active Vulnerability Scanner Report (CSRF, XSS)")
     lines.append("Only run on systems you own or are explicitly authorized to test.")
     lines.append(f"\nPages visited ({len(visited)}):")
     for page in sorted(list(visited)):
@@ -403,8 +364,10 @@ def create_report(report_file, findings, visited):
     lines.append(f"\nTotal findings entries: {len(findings)}")
     lines.append("")
 
-    vulnerable_findings = [f for f in findings if f.get('type') in ('active-missing-csrf', 'dangerous-link-get')]
-    other_findings = [f for f in findings if f.get('type') not in ('active-missing-csrf', 'dangerous-link-get')]
+    # MODIFIED: Added new XSS finding types to the vulnerable list
+    vulnerable_types = ['active-missing-csrf', 'dangerous-link-get', 'reflected-xss-get', 'reflected-xss-post']
+    vulnerable_findings = [f for f in findings if f.get('type') in vulnerable_types]
+    other_findings = [f for f in findings if f.get('type') not in vulnerable_types]
 
     if vulnerable_findings:
         lines.append("="*20 + " VULNERABLE FINDINGS " + "="*20)
@@ -424,9 +387,9 @@ def create_report(report_file, findings, visited):
         fh.write('\n'.join(lines))
     print(f"[+] Report written to {report_file}")
 
-# ---------------- CLI ----------------
+# --- CLI ---
 def parse_args():
-    p = argparse.ArgumentParser(description="Active CSRF testing crawler with automatic login.")
+    p = argparse.ArgumentParser(description="Active CSRF and XSS testing crawler with automatic login.")
     p.add_argument('--base', required=True, help='Base URL to start crawl')
     p.add_argument('--username', required=True, help='Username for login')
     p.add_argument('--password', required=True, help='Password for login')
@@ -439,10 +402,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print("ACTIVE CSRF TESTER — destructive active tests will be performed.")
+    print("ACTIVE VULNERABILITY SCANNER — destructive active tests will be performed.")
     print("Ensure you have explicit authorization to test the target system!")
     findings = crawl_and_test(args)
-    vuln_count = sum(1 for f in findings if f.get('type') in ('active-missing-csrf', 'dangerous-link-get'))
+    # MODIFIED: Updated the count to include new XSS findings
+    vuln_types = ['active-missing-csrf', 'dangerous-link-get', 'reflected-xss-get', 'reflected-xss-post']
+    vuln_count = sum(1 for f in findings if f.get('type') in vuln_types)
     print(f"[+] Crawl finished. Potential vulnerabilities found: {vuln_count}. Report saved to {args.report_file}")
 
 if __name__ == '__main__':
