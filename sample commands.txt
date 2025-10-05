@@ -1,1 +1,0 @@
- python main.py --base http://localhost:3000/ --username bee --password buggy --max-pages 300 --delay 0.5

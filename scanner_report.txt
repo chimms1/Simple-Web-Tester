@@ -10,7 +10,7 @@ Pages visited (7):
 - http://localhost:3000/logout
 - http://localhost:3000/register.html
 
-Total findings entries: 32
+Total findings entries: 26
 
 ==================== VULNERABLE FINDINGS ====================
 --- Vulnerability 1 ---
@@ -55,7 +55,7 @@ Total findings entries: 32
 {
   "type": "dangerous-link-get",
   "page": "http://localhost:3000/frontend/dashboard.html",
-  "link": "http://localhost:3000/frontend/addfunds.html",
+  "link": "http://localhost:3000/logout",
   "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
 }
 
@@ -63,7 +63,7 @@ Total findings entries: 32
 {
   "type": "dangerous-link-get",
   "page": "http://localhost:3000/frontend/dashboard.html",
-  "link": "http://localhost:3000/logout",
+  "link": "http://localhost:3000/frontend/addfunds.html",
   "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
 }
 
@@ -82,8 +82,8 @@ Total findings entries: 32
   "method": "post",
   "baseline_status": 200,
   "stripped_status": 200,
-  "baseline_body_len": 5073,
-  "stripped_body_len": 5073,
+  "baseline_body_len": 6407,
+  "stripped_body_len": 6407,
   "type": "active-missing-csrf",
   "detail": "Stripped request succeeded similarly -> likely missing CSRF protections."
 }
@@ -92,74 +92,11 @@ Total findings entries: 32
 {
   "type": "dangerous-link-get",
   "page": "http://localhost:3000/frontend/withdraw.html",
-  "link": "http://localhost:3000/frontend/changepassword.html",
+  "link": "http://localhost:3000/logout",
   "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
 }
 
 --- Vulnerability 10 ---
-{
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/withdraw.html",
-  "link": "http://localhost:3000/frontend/addfunds.html",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
-}
-
---- Vulnerability 11 ---
-{
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/withdraw.html",
-  "link": "http://localhost:3000/logout",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
-}
-
---- Vulnerability 12 ---
-{
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/addfunds.html",
-  "link": "http://localhost:3000/frontend/changepassword.html",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
-}
-
---- Vulnerability 13 ---
-{
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/addfunds.html",
-  "link": "http://localhost:3000/frontend/withdraw.html",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
-}
-
---- Vulnerability 14 ---
-{
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/addfunds.html",
-  "link": "http://localhost:3000/logout",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
-}
-
---- Vulnerability 15 ---
-{
-  "page": "http://localhost:3000/frontend/addfunds.html",
-  "form_action": "http://localhost:3000/addfunds",
-  "method": "post",
-  "baseline_status": 200,
-  "stripped_status": 200,
-  "baseline_body_len": 69,
-  "stripped_body_len": 69,
-  "type": "active-missing-csrf",
-  "detail": "Stripped request succeeded similarly -> likely missing CSRF protections."
-}
-
---- Vulnerability 16 ---
-{
-  "type": "sqli-post",
-  "page": "http://localhost:3000/frontend/addfunds.html",
-  "form_action": "http://localhost:3000/addfunds",
-  "parameter": "amount",
-  "payload": "' OR '1'='1",
-  "detail": "Response differs from baseline, possible SQL injection."
-}
-
---- Vulnerability 17 ---
 {
   "page": "http://localhost:3000/logout",
   "form_action": "http://localhost:3000/login",
@@ -172,7 +109,7 @@ Total findings entries: 32
   "detail": "Stripped request succeeded similarly -> likely missing CSRF protections."
 }
 
---- Vulnerability 18 ---
+--- Vulnerability 11 ---
 {
   "type": "reflected-xss-post",
   "page": "http://localhost:3000/logout",
@@ -182,7 +119,7 @@ Total findings entries: 32
   "detail": "Payload reflected unencoded in response."
 }
 
---- Vulnerability 19 ---
+--- Vulnerability 12 ---
 {
   "type": "reflected-xss-post",
   "page": "http://localhost:3000/logout",
@@ -192,7 +129,7 @@ Total findings entries: 32
   "detail": "Payload reflected unencoded in response."
 }
 
---- Vulnerability 20 ---
+--- Vulnerability 13 ---
 {
   "type": "sqli-post",
   "page": "http://localhost:3000/logout",
@@ -202,7 +139,7 @@ Total findings entries: 32
   "detail": "SQL error string found in response."
 }
 
---- Vulnerability 21 ---
+--- Vulnerability 14 ---
 {
   "type": "sqli-post",
   "page": "http://localhost:3000/logout",
@@ -212,7 +149,7 @@ Total findings entries: 32
   "detail": "Response differs from baseline, possible SQL injection."
 }
 
---- Vulnerability 22 ---
+--- Vulnerability 15 ---
 {
   "type": "cmdi-post",
   "page": "http://localhost:3000/logout",
@@ -222,7 +159,7 @@ Total findings entries: 32
   "detail": "Command injection marker \"CMD_INJECTED_42\" found in response."
 }
 
---- Vulnerability 23 ---
+--- Vulnerability 16 ---
 {
   "type": "cmdi-post",
   "page": "http://localhost:3000/logout",
@@ -232,23 +169,38 @@ Total findings entries: 32
   "detail": "Command injection marker \"CMD_INJECTED_42\" found in response."
 }
 
---- Vulnerability 24 ---
+--- Vulnerability 17 ---
 {
   "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/changepassword.html",
-  "link": "http://localhost:3000/frontend/withdraw.html",
+  "page": "http://localhost:3000/frontend/addfunds.html",
+  "link": "http://localhost:3000/logout",
   "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
 }
 
---- Vulnerability 25 ---
+--- Vulnerability 18 ---
 {
-  "type": "dangerous-link-get",
-  "page": "http://localhost:3000/frontend/changepassword.html",
-  "link": "http://localhost:3000/frontend/addfunds.html",
-  "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
+  "page": "http://localhost:3000/frontend/addfunds.html",
+  "form_action": "http://localhost:3000/addfunds",
+  "method": "post",
+  "baseline_status": 200,
+  "stripped_status": 200,
+  "baseline_body_len": 69,
+  "stripped_body_len": 69,
+  "type": "active-missing-csrf",
+  "detail": "Stripped request succeeded similarly -> likely missing CSRF protections."
 }
 
---- Vulnerability 26 ---
+--- Vulnerability 19 ---
+{
+  "type": "sqli-post",
+  "page": "http://localhost:3000/frontend/addfunds.html",
+  "form_action": "http://localhost:3000/addfunds",
+  "parameter": "amount",
+  "payload": "' OR '1'='1",
+  "detail": "Response differs from baseline, possible SQL injection."
+}
+
+--- Vulnerability 20 ---
 {
   "type": "dangerous-link-get",
   "page": "http://localhost:3000/frontend/changepassword.html",
@@ -256,7 +208,7 @@ Total findings entries: 32
   "detail": "Link contains state-change keyword and uses GET. Potential CSRF."
 }
 
---- Vulnerability 27 ---
+--- Vulnerability 21 ---
 {
   "page": "http://localhost:3000/frontend/changepassword.html",
   "form_action": "http://localhost:3000/changepassword",
@@ -269,7 +221,7 @@ Total findings entries: 32
   "detail": "Stripped request succeeded similarly -> likely missing CSRF protections."
 }
 
---- Vulnerability 28 ---
+--- Vulnerability 22 ---
 {
   "type": "reflected-xss-post",
   "page": "http://localhost:3000/frontend/changepassword.html",
@@ -279,7 +231,7 @@ Total findings entries: 32
   "detail": "Payload reflected unencoded in response."
 }
 
---- Vulnerability 29 ---
+--- Vulnerability 23 ---
 {
   "type": "sqli-post",
   "page": "http://localhost:3000/frontend/changepassword.html",
@@ -289,7 +241,7 @@ Total findings entries: 32
   "detail": "SQL error string found in response."
 }
 
---- Vulnerability 30 ---
+--- Vulnerability 24 ---
 {
   "type": "cmdi-post",
   "page": "http://localhost:3000/frontend/changepassword.html",

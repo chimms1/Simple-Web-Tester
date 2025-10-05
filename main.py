@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-vulnerability_scanner.py
-Active vulnerability scanner for CSRF, Reflected XSS, SQL Injection, and OS Command Injection
-with automatic login and login-form SQLi testing.
-
-Usage:
-  python vulnerability_scanner.py --base http://localhost:3000/ --username bee --password buggy
-
-WARNING: This script actively submits state-changing and probe requests and may cause commands to run
-on the target if it's vulnerable. Only run on systems you own or have explicit permission to test.
-"""
-
 import argparse
 import time
 import re
@@ -24,7 +11,7 @@ import json
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-# --- Heuristics and Payloads ---
+# --- Payloads ---
 COMMON_CSRF_NAMES = [
     'csrf_token', 'csrfmiddlewaretoken', 'authenticity_token', '__requestverificationtoken',
     'xsrf-token', 'xsrf_token', 'XSRF-TOKEN', 'csrf', '_csrf', '_csrf_token', 'token'
@@ -81,91 +68,137 @@ OS_CMD_PARAM_NAMES = ['command', 'cmd', 'exec', 'run', 'shell', 'system', 'oscmd
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0'
 
 # --- Utilities ---
+# A function that removes the part after the '#' in a URL
 def normalize_url(url):
-    u, _ = urldefrag(url)
-    return u
+    clean_url, ignore = urldefrag(url)  # Get the part before '#' and ignore the rest
+    return clean_url  # Return the cleaned URL
 
+
+# Check if two URLs are from the same website
 def same_domain(a, b):
-    return urlparse(a).netloc == urlparse(b).netloc
+    domain1 = urlparse(a).netloc  
+    domain2 = urlparse(b).netloc
+    return domain1 == domain2
+
 
 def looks_like_state_changing_url(href):
+    
     if not href:
         return False
+    
     href_lower = href.lower()
+    
     for kw in STATE_CHANGE_KEYWORDS:
         if kw in href_lower:
             return True
+    
     if '?' in href:
         q = href.split('?', 1)[1]
         if re.search(r'\b(action|cmd|op)=(' + '|'.join(STATE_CHANGE_KEYWORDS) + r')\b', q, re.IGNORECASE):
             return True
+    
     return False
 
+
 def is_likely_csrf_token_name(name):
+    
     if not name:
         return False
+        
     lname = name.lower()
+    
     for common in COMMON_CSRF_NAMES:
         if common in lname:
             return True
+    
     if lname.startswith('x-csrf') or lname.startswith('x-xsrf') or lname.startswith('__requestverificationtoken'):
         return True
+    
     return False
 
 def simple_response_similarity(a_text, b_text):
+    
     if a_text is None or b_text is None:
         return False
+        
     la, lb = len(a_text), len(b_text)
+    
     if la == 0 and lb == 0:
         return True
+        
     if max(la, lb) == 0:
         return False
+        
     if abs(la - lb) / max(la, lb) > 0.20:
         return False
+        
     sa = ' '.join(a_text.split())
     sb = ' '.join(b_text.split())
+    
     seq = difflib.SequenceMatcher(None, sa, sb)
+    
     return seq.quick_ratio() > 0.92
 
 def get_links_and_forms(html, base):
+    
     soup = BeautifulSoup(html, 'html.parser')
     links = set()
+    
     for a in soup.find_all('a', href=True):
         full = urljoin(base, a['href'].strip())
         links.add(normalize_url(full))
+        
     forms = soup.find_all('form')
+    
     return links, forms
 
 def extract_form_action(form, current_url):
+    
     action = form.get('action')
+    
     if not action:
         return current_url
+        
     return normalize_url(urljoin(current_url, action))
 
 def gather_hidden_inputs(form):
+    
     data = {}
+    
     for inp in form.find_all('input'):
+        
         name = inp.get('name')
+        
         if not name:
             continue
+        
         value = inp.get('value', '')
         data[name] = value
+        
     return data
 
 # --- OS command keyword detection (passive) ---
 def detect_form_for_os_commands(form, page_url):
+    
     suspicious = []
+    
     for inp in form.find_all('input'):
+        
         name = inp.get('name', '').lower()
         value = inp.get('value', '').lower()
+        
         if any(param in name for param in OS_CMD_PARAM_NAMES):
+            
             suspicious.append({
                 'page': page_url,
                 'parameter': name,
                 'reason': 'suspicious parameter name in form'
             })
+            
         for cmd in OS_CMD_KEYWORDS:
+            
             if cmd in value:
+                
                 suspicious.append({
                     'page': page_url,
                     'parameter': name,
@@ -173,16 +206,20 @@ def detect_form_for_os_commands(form, page_url):
                     'command': cmd,
                     'reason': f'suspicious value in hidden input ("{cmd}")'
                 })
+                
     return suspicious
 
 
 # --- Login Helpers ---
 def looks_like_login_form(form):
+    
     uname_fields = ['username','user','email','login','userid']
     pword_fields = ['password','pass']
     input_names = [(inp.get('name') or '').lower() for inp in form.find_all('input')]
+    
     has_uname = any(u in input_names for u in uname_fields)
     has_pword = any(p in input_names for p in pword_fields)
+    
     return has_uname and has_pword
 
 def attempt_form_login(session, page_url, username, password):
@@ -199,31 +236,43 @@ def attempt_form_login(session, page_url, username, password):
 
     forms = soup.find_all('form')
     candidate = None
+    
     uname_names = ['username','user','email','login','userid']
     pword_names = ['password','pass']
+    
     for f in forms:
+        
         input_names = [(inp.get('name') or '').lower() for inp in f.find_all('input')]
+        
         if any(u in input_names for u in uname_names) and any(p in input_names for p in pword_names):
             candidate = f
             break
+        
     if candidate is None and forms:
         candidate = forms[0]
+        
     elif candidate is None:
         return None
 
     data = gather_hidden_inputs(candidate)
     ufield = pfield = None
+    
     for inp in candidate.find_all('input'):
+        
         name = inp.get('name') or inp.get('id') or ''
         lname = name.lower()
+        
         if any(u in lname for u in uname_names) and ufield is None:
             ufield = name
         if any(p in lname for p in pword_names) and pfield is None:
             pfield = name
+            
     ufield = ufield or 'username'
     pfield = pfield or 'password'
+    
     data[ufield] = username
     data[pfield] = password
+    
     action = extract_form_action(candidate, page_url)
     method = (candidate.get('method') or 'post').lower()
 
@@ -231,29 +280,38 @@ def attempt_form_login(session, page_url, username, password):
         resp = session.request(method, action, data=data, timeout=20, allow_redirects=True)
         if resp.status_code < 400:
             return resp
+            
     except requests.exceptions.RequestException as e:
         print(f"[!] Login request to {action} failed: {e}")
         return None
+        
     return None
 
 # --- Login-form SQLi test ---
 def test_login_form_for_sqli(session, form, page_url):
+    
     findings = []
     action = extract_form_action(form, page_url)
     method = (form.get('method') or 'post').lower()
+    
     if method not in ('post','get'):
         return findings
 
     baseline = build_baseline_payload(form)
     uname_field = None
     pword_field = None
+    
     for inp in form.find_all('input'):
+        
         name = inp.get('name') or inp.get('id') or ''
         lname = name.lower()
+        
         if any(u in lname for u in ['username','user','email','login','userid']) and not uname_field:
             uname_field = name
+            
         if any(p in lname for p in ['password','pass']) and not pword_field:
             pword_field = name
+            
     if not uname_field:
         return findings
 
@@ -268,6 +326,7 @@ def test_login_form_for_sqli(session, form, page_url):
     #     })
 
     baseline_resp = None
+    
     try:
         if method == 'get':
             baseline_resp = session.get(action, params=baseline, timeout=10)
@@ -277,6 +336,7 @@ def test_login_form_for_sqli(session, form, page_url):
         baseline_resp = None
 
     for payload in SQLI_PAYLOADS:
+        
         injected = baseline.copy()
         injected[uname_field] = payload
         if pword_field:
@@ -290,7 +350,9 @@ def test_login_form_for_sqli(session, form, page_url):
             continue
 
         body = (r.text or '').lower()
+        
         if any(err in body for err in SQL_ERRORS):
+            
             findings.append({
                 'type': 'sqli-login',
                 'page': page_url,
@@ -299,9 +361,13 @@ def test_login_form_for_sqli(session, form, page_url):
                 'payload': payload,
                 'detail': 'SQL error string found in login response.'
             })
+            
             break
+        
         success_indicators = ['dashboard', 'welcome', 'logged in', 'logout']
+        
         if any(ind in body for ind in success_indicators):
+            
             findings.append({
                 'type': 'sqli-login',
                 'page': page_url,
@@ -310,8 +376,11 @@ def test_login_form_for_sqli(session, form, page_url):
                 'payload': payload,
                 'detail': 'Login-like success indicator found after injection (possible login bypass).'
             })
+            
             break
+        
         if baseline_resp and not simple_response_similarity(baseline_resp.text or '', r.text or ''):
+            
             findings.append({
                 'type': 'sqli-login',
                 'page': page_url,
@@ -320,45 +389,71 @@ def test_login_form_for_sqli(session, form, page_url):
                 'payload': payload,
                 'detail': 'Response differs from baseline after injection (possible SQLi).'
             })
+            
             break
 
     return findings
 
 # --- CSRF Active Test Helpers ---
 def build_baseline_payload(form):
+    
     data = {}
+    
     for inp in form.find_all('input'):
+        
         name = inp.get('name')
-        if not name: continue
+        
+        if not name:
+            continue
+        
         itype = (inp.get('type') or 'text').lower()
         val = inp.get('value','')
-        if itype in ('hidden','submit'): data[name] = val
-        elif itype in ('text','email','search','tel'): data[name] = val or 'test'
-        elif itype == 'password': data[name] = val or 'TestPass123!'
-        elif itype == 'number': data[name] = val or '1'
-        else: data[name] = val
+        
+        if itype in ('hidden','submit'):
+            data[name] = val
+            
+        elif itype in ('text','email','search','tel'):
+            data[name] = val or 'test'
+            
+        elif itype == 'password':
+            data[name] = val or 'TestPass123!'
+            
+        elif itype == 'number':
+            data[name] = val or '1'
+            
+        else:
+            data[name] = val
+            
     for ta in form.find_all('textarea'):
         name = ta.get('name')
         if name: data[name] = ta.text or 'test'
+        
     for s in form.find_all('select'):
         name = s.get('name')
-        if not name: continue
+        if not name:
+            continue
+        
         opt = s.find('option', selected=True) or s.find('option')
         data[name] = opt.get('value') or opt.text if opt else '1'
+        
     return data
 
 def build_stripped_payload(baseline):
     return {k:v for k,v in baseline.items() if not is_likely_csrf_token_name(k)}
 
 def attempt_active_csrf_test(session, form, page_url):
+    
     action = extract_form_action(form, page_url)
     method = (form.get('method') or 'post').lower()
+    
     if method not in ('post','put','patch','delete'):
         return None
     baseline = build_baseline_payload(form)
     if not baseline:
         return None
+        
     headers = dict(session.headers)
+    
     try:
         r1 = session.request(method, action, data=baseline, headers=headers, timeout=20)
         stripped_payload = build_stripped_payload(baseline)
@@ -366,15 +461,20 @@ def attempt_active_csrf_test(session, form, page_url):
         r2 = session.request(method, action, data=stripped_payload, headers=stripped_headers, timeout=20)
     except Exception as e:
         return {'type':'active-test-error','page':page_url,'action':action,'detail':str(e)}
+    
     status_similar = (r1.status_code == r2.status_code) or (200 <= r1.status_code < 400 and 200 <= r2.status_code < 400)
+    
     body_similar = simple_response_similarity(r1.text or '', r2.text or '')
+    
     finding = {'page': page_url,'form_action': action,'method': method,
                'baseline_status': r1.status_code,'stripped_status': r2.status_code,
                'baseline_body_len': len(r1.text or ''),'stripped_body_len': len(r2.text or '')}
+    
     if status_similar and body_similar:
         finding['type'] = 'active-missing-csrf'
         finding['detail'] = 'Stripped request succeeded similarly -> likely missing CSRF protections.'
         return finding
+    
     else:
         finding['type'] = 'active-protected'
         finding['detail'] = 'CSRF protections likely present.'
@@ -382,11 +482,14 @@ def attempt_active_csrf_test(session, form, page_url):
 
 # --- XSS Active Test Helpers ---
 def test_url_for_xss(session, url):
+    
     findings = []
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
+    
     if not query_params:
         return findings
+    
     for param in query_params:
         for payload in XSS_PAYLOADS:
             injected_params = query_params.copy()
@@ -396,12 +499,15 @@ def test_url_for_xss(session, url):
             try:
                 r = session.get(test_url, timeout=10)
                 if payload in r.text:
+                    
                     findings.append({
                         'type': 'reflected-xss-get', 'page': url, 'vulnerable_url': test_url,
                         'parameter': param, 'payload': payload,
                         'detail': 'Payload reflected unencoded in response.'
                     })
+                    
                     break
+                
             except requests.exceptions.RequestException:
                 continue
     return findings
@@ -410,9 +516,12 @@ def test_form_for_xss(session, form, page_url):
     findings = []
     action = extract_form_action(form, page_url)
     method = (form.get('method') or 'get').lower()
+    
     if method != 'post':
         return findings
+    
     baseline_data = build_baseline_payload(form)
+    
     for field in baseline_data.keys():
         for payload in XSS_PAYLOADS:
             injected_data = baseline_data.copy()
@@ -428,6 +537,7 @@ def test_form_for_xss(session, form, page_url):
                     break
             except requests.exceptions.RequestException:
                 continue
+            
     return findings
 
 # --- SQL Injection Test Helpers ---
@@ -437,19 +547,26 @@ def test_url_for_sqli(session, url):
     params = parse_qs(parsed.query)
     if not params:
         return findings
+    
     try:
         baseline_resp = session.get(url, timeout=10)
+    
     except requests.exceptions.RequestException:
         baseline_resp = None
+    
     for param in params:
+        
         for payload in SQLI_PAYLOADS:
+            
             injected = params.copy()
             injected[param] = [payload]
             new_query = urlencode(injected, doseq=True)
             test_url = parsed._replace(query=new_query).geturl()
+            
             try:
                 r = session.get(test_url, timeout=10)
                 body = (r.text or '').lower()
+                
                 if any(err in body for err in SQL_ERRORS):
                     findings.append({
                         'type': 'sqli-get', 'page': url, 'vulnerable_url': test_url,
@@ -457,6 +574,7 @@ def test_url_for_sqli(session, url):
                         'detail': 'SQL error string found in response.'
                     })
                     break
+                
                 elif baseline_resp and not simple_response_similarity(baseline_resp.text or '', r.text or ''):
                     findings.append({
                         'type': 'sqli-get', 'page': url, 'vulnerable_url': test_url,
@@ -464,28 +582,37 @@ def test_url_for_sqli(session, url):
                         'detail': 'Response differs from baseline, possible SQL injection.'
                     })
                     break
+                
             except requests.exceptions.RequestException:
                 continue
+            
     return findings
 
 def test_form_for_sqli(session, form, page_url):
+    
     findings = []
     action = extract_form_action(form, page_url)
     method = (form.get('method') or 'get').lower()
+    
     if method != 'post':
         return findings
+        
     baseline_data = build_baseline_payload(form)
+    
     try:
         baseline_resp = session.post(action, data=baseline_data, timeout=10)
     except requests.exceptions.RequestException:
         baseline_resp = None
+        
     for field in baseline_data.keys():
         for payload in SQLI_PAYLOADS:
             injected = baseline_data.copy()
             injected[field] = payload
+            
             try:
                 r = session.post(action, data=injected, timeout=10)
                 body = (r.text or '').lower()
+                
                 if any(err in body for err in SQL_ERRORS):
                     findings.append({
                         'type': 'sqli-post', 'page': page_url, 'form_action': action,
@@ -493,6 +620,7 @@ def test_form_for_sqli(session, form, page_url):
                         'detail': 'SQL error string found in response.'
                     })
                     break
+                
                 elif baseline_resp and not simple_response_similarity(baseline_resp.text or '', r.text or ''):
                     findings.append({
                         'type': 'sqli-post', 'page': page_url, 'form_action': action,
@@ -500,8 +628,10 @@ def test_form_for_sqli(session, form, page_url):
                         'detail': 'Response differs from baseline, possible SQL injection.'
                     })
                     break
+                
             except requests.exceptions.RequestException:
                 continue
+            
     return findings
 
 # --- NEW: OS Command Injection Test Helpers (with passive OS-keyword checks) ---
@@ -531,11 +661,14 @@ def test_url_for_cmdi(session, url):
             injected[param] = [payload]
             new_query = urlencode(injected, doseq=True)
             test_url = parsed._replace(query=new_query).geturl()
+            
             try:
                 r = session.get(test_url, timeout=10)
             except requests.exceptions.RequestException:
                 continue
+            
             body = r.text or ''
+            
             # marker detection (case-sensitive to avoid false positives)
             if CMDI_MARKER in body:
                 findings.append({
@@ -547,6 +680,7 @@ def test_url_for_cmdi(session, url):
                     'detail': f'Command injection marker "{CMDI_MARKER}" found in response.'
                 })
                 break
+            
     return findings
 
 def test_form_for_cmdi(session, form, page_url):
@@ -573,14 +707,18 @@ def test_form_for_cmdi(session, form, page_url):
     #     })
 
     for field in list(baseline_data.keys()):
+        
         for payload in CMDI_PAYLOADS:
             injected = baseline_data.copy()
             injected[field] = payload
+            
             try:
                 r = session.post(action, data=injected, timeout=10)
             except requests.exceptions.RequestException:
                 continue
+            
             body = r.text or ''
+            
             if CMDI_MARKER in body:
                 findings.append({
                     'type': 'cmdi-post',
@@ -591,14 +729,18 @@ def test_form_for_cmdi(session, form, page_url):
                     'detail': f'Command injection marker "{CMDI_MARKER}" found in response.'
                 })
                 break
+            
     return findings
 
 # --- Crawler ---
 def crawl_and_test(args):
+    
     session = requests.Session()
     session.headers.update({'User-Agent': USER_AGENT})
+    
     if args.insecure:
         session.verify = False
+        
     visited = set()
     to_visit = deque([args.base])
     findings = []
@@ -606,10 +748,13 @@ def crawl_and_test(args):
     logged_in = False
 
     while to_visit and pages_checked < args.max_pages:
+        
         url = normalize_url(to_visit.popleft())
         if url in visited:
             continue
+        
         print(f"[*] Crawling: {url}")
+        
         visited.add(url)
 
         # Passive: test URL parameters for XSS, SQLi, CMDi and OS-keywords
@@ -637,16 +782,20 @@ def crawl_and_test(args):
                     findings.extend(os_form_findings)
                     
                 if looks_like_login_form(f):
+                    
                     # 1) test login form for SQLi
                     sqli_login_findings = test_login_form_for_sqli(session, f, url)
                     if sqli_login_findings:
                         findings.extend(sqli_login_findings)
+                        
                     # 2) test login form for CMDi (special-case: login 'username' param)
                     cmdi_login_findings = test_form_for_cmdi(session, f, url)
                     if cmdi_login_findings:
                         findings.extend(cmdi_login_findings)
+                        
                     # Then attempt normal login
                     login_response = attempt_form_login(session, url, args.username, args.password)
+                    
                     if login_response:
                         logged_in = True
                         print(f"[+] Logged in successfully.")
@@ -658,7 +807,9 @@ def crawl_and_test(args):
                         break
 
         # enqueue links and flag suspicious GETs
+        
         for link in links:
+            
             if same_domain(link, args.base):
                 if args.exclude and any(re.search(p, link) for p in args.exclude): continue
                 if link not in visited:
@@ -693,12 +844,15 @@ def crawl_and_test(args):
 
 # --- Reporting ---
 def create_report(report_file, findings, visited):
+    
     lines = []
     lines.append("Active Vulnerability Scanner Report (CSRF, XSS, SQLi, CMDi)")
     lines.append("Only run on systems you own or are explicitly authorized to test.")
     lines.append(f"\nPages visited ({len(visited)}):")
+    
     for page in sorted(list(visited)):
         lines.append(f"- {page}")
+        
     lines.append(f"\nTotal findings entries: {len(findings)}")
     lines.append("")
 
@@ -706,6 +860,7 @@ def create_report(report_file, findings, visited):
                         'reflected-xss-get', 'reflected-xss-post',
                         'sqli-get', 'sqli-post', 'sqli-login',
                         'cmdi-get', 'cmdi-post']
+                        
     vulnerable_findings = [f for f in findings if f.get('type') in vulnerable_types]
     other_findings = [f for f in findings if f.get('type') not in vulnerable_types]
 
@@ -715,6 +870,7 @@ def create_report(report_file, findings, visited):
             lines.append(f"--- Vulnerability {i} ---")
             lines.append(json.dumps(f, indent=2))
             lines.append("")
+            
     if other_findings:
         lines.append("="*20 + " INFORMATIONAL FINDINGS " + "="*20)
         for i,f in enumerate(other_findings, start=1):
@@ -724,10 +880,12 @@ def create_report(report_file, findings, visited):
 
     with open(report_file, 'w', encoding='utf-8') as fh:
         fh.write('\n'.join(lines))
+        
     print(f"[+] Report written to {report_file}")
 
 # --- CLI ---
 def parse_args():
+    
     p = argparse.ArgumentParser(description="Active CSRF, XSS, SQLi and CMDi testing crawler with automatic login.")
     p.add_argument('--base', required=True, help='Base URL to start crawl')
     p.add_argument('--username', required=True, help='Username for login')
@@ -740,13 +898,17 @@ def parse_args():
     return p.parse_args()
 
 def main():
+    
     args = parse_args()
     print("ACTIVE VULNERABILITY SCANNER — destructive active tests will be performed.")
-    print("Ensure you have explicit authorization to test the target system!")
+    
     findings = crawl_and_test(args)
+    
     vuln_types = ['active-missing-csrf', 'dangerous-link-get', 'reflected-xss-get',
                   'reflected-xss-post', 'sqli-get', 'sqli-post', 'sqli-login', 'cmdi-get', 'cmdi-post']
+   
     vuln_count = sum(1 for f in findings if f.get('type') in vuln_types)
+    
     print(f"[+] Crawl finished. Potential vulnerabilities found: {vuln_count}. Report saved to {args.report_file}")
 
 if __name__ == '__main__':
